@@ -1,0 +1,7 @@
+# Product categories to track, as HS4 codes (4-digit Harmonized System).
+# Replace with the categories you actually care about (e.g. from your RC Imports work).
+# Look codes up at https://hts.usitc.gov/ before adding.
+   categories:
+     - hs4: "392010"   # stretch film (PE film)
+     - hs4: "4015"     # rubber gloves incl. nitrile
+     - hs4: "630790"   # other made-up textile articles (includes N95 / face masks)

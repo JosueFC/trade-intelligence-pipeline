@@ -1,0 +1,19 @@
+version: 2
+
+models:
+  - name: mart_supplier_share
+    columns:
+      - name: month
+        tests: [not_null]
+      - name: hs4
+        tests: [not_null]
+      - name: cty_code
+        tests: [not_null]
+      - name: share
+        tests: [not_null]
+  - name: mart_price_alerts
+    columns:
+      - name: month
+        tests: [not_null]
+      - name: is_alert
+        tests: [not_null]

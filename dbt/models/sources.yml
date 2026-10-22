@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: census_imports
+        description: One row per month x category (HS4) x country, exactly as returned by the Census API.
+        columns:
+          - name: month
+            tests: [not_null]
+          - name: hs4
+            tests: [not_null]

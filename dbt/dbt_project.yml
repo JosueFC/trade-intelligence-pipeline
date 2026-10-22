@@ -1,0 +1,29 @@
+name: trade_intel
+version: "1.0.0"
+config-version: 2
+profile: trade_intel
+
+model-paths: ["models"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+
+models:
+  trade_intel:
+    staging:
+      +materialized: view
+    intermediate:
+      +materialized: view
+    marts:
+      +materialized: table
+
+vars:
+  price_alert_z: 4              # z-score cutoff for unit-price alerts; lower = more alerts, more noise
+  alert_min_pct: 0.10           # ...and the price must also differ from its trailing average by at least this fraction
+  alert_min_value_usd: 100000   # ignore product-country-months with less trade than this (tiny flows are noisy)
+
+seeds:
+  trade_intel:
+    category_allowlist:
+      +column_types: {hs4: varchar, hs10: varchar}
+    category_labels:
+      +column_types: {hs4: varchar}

@@ -1,0 +1,7 @@
+trade_intel:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('TRADE_DB', '../data/trade.duckdb') }}"
+      threads: 2
