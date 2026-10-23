@@ -86,3 +86,48 @@ def test_resume_skips_old_partitions_but_refreshes_recent(tmp_path, monkeypatch)
     monkeypatch.setattr(ci, "fetch", lambda m, h, k, s=None, retries=5: fetched.append(m) or payload(2))
     ci.run(["2025-01", "2025-02", "2025-03", "2025-04", "2025-05"], ["8517"], None, con, resume=True)
     assert fetched == ["2025-03", "2025-04", "2025-05"]
+
+
+def test_one_failed_partition_is_logged_and_does_not_abort_the_run(tmp_path, monkeypatch):
+    con = ci.connect(tmp_path / "t.duckdb")
+
+    def flaky_fetch(month, hs4, key, session=None, retries=5):
+        if (month, hs4) == ("2025-02", "6403"):
+            raise RuntimeError("HTTP 500 boom")
+        return payload(2)
+
+    monkeypatch.setattr(ci, "fetch", flaky_fetch)
+    res = ci.run(["2025-01", "2025-02", "2025-03"], ["8517", "6403"], None, con)
+    assert res.rows == 10                       # 5 good partitions x 2 rows
+    assert [(m, h) for m, h, _ in res.failures] == [("2025-02", "6403")]
+    row = con.execute("select status, error from raw.ingest_log where status = 'failed'").fetchall()
+    assert row and "boom" in row[0][1]
+    assert ci.report(res) == 1                  # non-zero exit code so CI / the shell notices
+
+
+def test_failed_partition_is_retried_by_resume(tmp_path, monkeypatch):
+    con = ci.connect(tmp_path / "t.duckdb")
+    calls = []
+
+    def fetch_once_failing(month, hs4, key, session=None, retries=5):
+        calls.append(month)
+        if month == "2025-01" and calls.count("2025-01") == 1:
+            raise RuntimeError("transient")
+        return payload(2)
+
+    monkeypatch.setattr(ci, "fetch", fetch_once_failing)
+    months = ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"]
+    first = ci.run(months, ["8517"], None, con, resume=True)
+    assert len(first.failures) == 1
+    second = ci.run(months, ["8517"], None, con, resume=True)
+    assert second.failures == []
+    assert con.execute("select count(*) from raw.census_imports where month = '2025-01'").fetchone()[0] == 2
+
+
+def test_schema_drift_aborts_and_is_logged(tmp_path, monkeypatch):
+    con = ci.connect(tmp_path / "t.duckdb")
+    bad = payload(2, header=[c for c in ci.EXPECTED_COLUMNS if c != "UNIT_QY1"])
+    monkeypatch.setattr(ci, "fetch", lambda *a, **k: bad)
+    with pytest.raises(ci.SchemaDrift):
+        ci.run(["2025-01", "2025-02"], ["8517"], None, con)
+    assert con.execute("select count(*) from raw.ingest_log where status = 'failed'").fetchone()[0] == 1

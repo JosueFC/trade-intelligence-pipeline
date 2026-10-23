@@ -17,3 +17,32 @@ models:
         tests: [not_null]
       - name: is_alert
         tests: [not_null]
+
+unit_tests:
+  - name: price_lines_never_mix_quantity_units
+    description: >
+      100 kg and 50,000 pieces of the same product from the same country in one month must produce
+      two separate price lines (10 USD/KG and 0.02 USD/NO), never one blended line.
+    model: mart_price_alerts
+    given:
+      - input: ref('stg_census_imports')
+        rows:
+          - {month: '2025-01-01', hs4: '4015', hs10: '4015121010', commodity_desc: GLOVES, cty_code: '5700', cty_name: CHINA, import_value_usd: 1000, quantity: 100, quantity_unit: KG}
+          - {month: '2025-01-01', hs4: '4015', hs10: '4015121010', commodity_desc: GLOVES, cty_code: '5700', cty_name: CHINA, import_value_usd: 1000, quantity: 50000, quantity_unit: NO}
+    expect:
+      rows:
+        - {hs10: '4015121010', cty_code: '5700', price_unit: KG, import_value_usd: 1000, unit_price_usd: 10}
+        - {hs10: '4015121010', cty_code: '5700', price_unit: NO, import_value_usd: 1000, unit_price_usd: 0.02}
+
+  - name: lines_without_a_unit_or_quantity_are_not_priced
+    description: Rows with a null unit or zero quantity must not create price lines.
+    model: mart_price_alerts
+    given:
+      - input: ref('stg_census_imports')
+        rows:
+          - {month: '2025-01-01', hs4: '4015', hs10: '4015121010', commodity_desc: GLOVES, cty_code: '5700', cty_name: CHINA, import_value_usd: 500, quantity: 0, quantity_unit: NO}
+          - {month: '2025-01-01', hs4: '4015', hs10: '4015121010', commodity_desc: GLOVES, cty_code: '5700', cty_name: CHINA, import_value_usd: 500, quantity: 10, quantity_unit: null}
+          - {month: '2025-01-01', hs4: '4015', hs10: '4015121010', commodity_desc: GLOVES, cty_code: '2010', cty_name: MEXICO, import_value_usd: 300, quantity: 30, quantity_unit: NO}
+    expect:
+      rows:
+        - {hs10: '4015121010', cty_code: '2010', price_unit: NO, unit_price_usd: 10}

@@ -3,34 +3,47 @@ on:
   schedule:
     - cron: "17 9 12 * *"      # 12th of each month; Census publishes with a lag
   workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
 jobs:
   ingest:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     env:
       CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
       DBT_SEND_ANONYMOUS_USAGE_STATS: "False"
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
-      - name: Restore database from last run
-        uses: actions/cache/restore@v4
-        with:
-          path: data/trade.duckdb
-          key: trade-db-${{ github.run_id }}
-          restore-keys: trade-db-
-      - name: Backfill if first run, otherwise incremental
+
+      # Actions caches are deleted after 7 days without use, which a monthly job always exceeds.
+      # Run artifacts are kept 90 days, so the database and the raw landing zone travel as an artifact.
+      - name: Restore data from the last successful run
         run: |
-          if [ -f data/trade.duckdb ]; then
-            python -m ingest.census_imports --since-last
+          RUN_ID=$(gh run list --workflow=ingest.yml --status=success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$RUN_ID" ]; then
+            echo "restoring data from run $RUN_ID"
+            mkdir -p data && gh run download "$RUN_ID" --name trade-data --dir data
           else
-            python -m ingest.census_imports --start 2023-01
+            echo "no previous successful run: this is a full backfill"
           fi
-      - run: cd dbt && dbt build --profiles-dir .
-      - name: Save database for next run
-        uses: actions/cache/save@v4
+
+      # --resume skips partitions that are already loaded (so a restored database makes this
+      # incremental), still refreshes the newest 3 months, and retries anything that failed before.
+      - name: Load data
+        run: python -m ingest.census_imports --start 2023-01 --resume
+
+      - name: Build models and run tests
+        run: cd dbt && dbt build --profiles-dir .
+
+      - name: Save data for the next run
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          path: data/trade.duckdb
-          key: trade-db-${{ github.run_id }}
+          name: trade-data
+          path: data
+          retention-days: 90

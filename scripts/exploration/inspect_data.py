@@ -1,3 +1,4 @@
+"""Row counts, zero values, the list of countries, and the top suppliers for the latest month."""
 import duckdb
 
 c = duckdb.connect("data/trade.duckdb", read_only=True)
@@ -12,13 +13,13 @@ print(c.execute("""
 
 print("\n--- Distinct countries (look for non-countries) ---")
 print(c.execute("""
-    select cty_code, cty_name, count(*) as rows
+    select cty_code, cty_name, count(*) as n
     from raw.census_imports group by 1, 2 order by 1
 """).df().to_string(index=False))
 
-print("\n--- Top 5 suppliers, latest month, per category ---")
+print("\n--- Top 5 suppliers per category, latest month ---")
 print(c.execute("""
-    select hs4, cty_name, round(share * 100, 1) as share_pct, round(unit_price_usd, 2) as unit_price
+    select category_label, cty_name, round(share * 100, 1) as share_pct
     from mart_supplier_share
     where month = (select max(month) from mart_supplier_share) and supplier_rank <= 5
     order by hs4, supplier_rank

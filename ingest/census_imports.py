@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import duckdb
@@ -60,7 +61,8 @@ CREATE TABLE IF NOT EXISTS raw.census_imports (
     _ingested_at TIMESTAMP DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS raw.ingest_log (
-    month VARCHAR, hs4 VARCHAR, n_rows BIGINT, status VARCHAR, _logged_at TIMESTAMP DEFAULT now()
+    month VARCHAR, hs4 VARCHAR, n_rows BIGINT, status VARCHAR, error VARCHAR,
+    _logged_at TIMESTAMP DEFAULT now()
 );
 """
 
@@ -77,6 +79,7 @@ def connect(path: Path = DB_PATH) -> duckdb.DuckDBPyConnection:
     path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(path))
     con.execute(DDL)
+    con.execute("ALTER TABLE raw.ingest_log ADD COLUMN IF NOT EXISTS error VARCHAR")  # older databases
     return con
 
 
@@ -202,11 +205,28 @@ def already_loaded(con, month: str, hs4: str) -> bool:
     return n > 0
 
 
+@dataclass
+class RunResult:
+    rows: int = 0
+    failures: list[tuple[str, str, str]] = field(default_factory=list)   # (month, category, error)
+
+
+def log_status(con, month: str, hs4: str, status: str, error: str | None = None) -> None:
+    con.execute("INSERT INTO raw.ingest_log (month, hs4, n_rows, status, error) VALUES (?,?,?,?,?)",
+                [month, hs4, 0, status, error])
+
+
 def run(months: list[str], hs_codes: list[str], api_key: str | None,
         con: duckdb.DuckDBPyConnection, stop_on_unpublished: bool = False,
-        resume: bool = False) -> int:
-    """resume=True skips partitions already loaded, except the 3 newest months (Census revises those)."""
-    total = 0
+        resume: bool = False) -> RunResult:
+    """Load every month x category partition.
+
+    resume=True skips partitions already loaded, except the 3 newest months (Census revises those).
+    A failed partition is logged to raw.ingest_log (status 'failed' + error) and the run continues,
+    so one bad request no longer aborts a 130-request backfill. Schema drift is the exception: it
+    would affect every partition, so it is logged and then re-raised.
+    """
+    result = RunResult()
     session = requests.Session()
     recent = set(months[-3:])
     for month in months:
@@ -216,16 +236,37 @@ def run(months: list[str], hs_codes: list[str], api_key: str | None,
                 continue
             try:
                 payload = fetch(month, hs4, api_key, session)
+                save_raw(month, hs4, payload)
+                n = load_partition(con, month, hs4, payload)
             except NotPublishedYet as e:
                 print(f"skip: {e}")
+                log_status(con, month, hs4, "not_published")
                 if stop_on_unpublished:
-                    return total
+                    return result
                 continue
-            save_raw(month, hs4, payload)
-            n = load_partition(con, month, hs4, payload)
-            total += n
+            except SchemaDrift as e:
+                log_status(con, month, hs4, "failed", f"SchemaDrift: {e}")
+                result.failures.append((month, hs4, f"SchemaDrift: {e}"))
+                raise
+            except Exception as e:  # noqa: BLE001 - we log everything and keep going
+                msg = f"{type(e).__name__}: {e}"[:500]
+                print(f"FAILED {month} hs4={hs4}: {msg}")
+                log_status(con, month, hs4, "failed", msg)
+                result.failures.append((month, hs4, msg))
+                continue
+            result.rows += n
             print(f"loaded {month} hs4={hs4}: {n} rows")
-    return total
+    return result
+
+
+def report(result: RunResult) -> int:
+    """Print a summary and return a process exit code (1 if anything failed)."""
+    print(f"\ndone: {result.rows} rows loaded, {len(result.failures)} partition(s) failed")
+    for month, hs4, err in result.failures:
+        print(f"  FAILED {month} {hs4}: {err}")
+    if result.failures:
+        print("Rerun the same command with --resume to retry only what is missing.")
+    return 1 if result.failures else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -234,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start", help="first month YYYY-MM (backfill)")
     ap.add_argument("--end", help="last month YYYY-MM (default: this month)")
     ap.add_argument("--since-last", action="store_true", help="load months after the latest loaded one")
-    ap.add_argument("--resume", action="store_true", help="skip month/category partitions already loaded (safe to rerun after a failure)")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip month/category partitions already loaded (safe to rerun after a failure)")
     ap.add_argument("--config", default="config/categories.yml")
     args = ap.parse_args(argv)
 
@@ -256,12 +298,10 @@ def main(argv: list[str] | None = None) -> int:
         # Re-pull the last loaded month too: Census revises recent months.
         months = months_between(last, end)
         print(f"incremental: {months[0]} .. {end}")
-        run(months, hs_codes, api_key, con, stop_on_unpublished=False)
-    else:
-        if not args.start:
-            sys.exit("Provide --start YYYY-MM (or --since-last / --probe)")
-        run(months_between(args.start, end), hs_codes, api_key, con, resume=args.resume)
-    return 0
+        return report(run(months, hs_codes, api_key, con, stop_on_unpublished=False))
+    if not args.start:
+        sys.exit("Provide --start YYYY-MM (or --since-last / --probe)")
+    return report(run(months_between(args.start, end), hs_codes, api_key, con, resume=args.resume))
 
 
 if __name__ == "__main__":

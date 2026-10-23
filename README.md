@@ -24,7 +24,7 @@ pip install -r requirements.txt
 ### Step 2: dry run on synthetic data (no API needed, about 2 minutes)
 Proves your machine works and shows you the finished dashboard before touching real data.
 ```bash
-python -m pytest -q tests                 # 6 tests should pass
+python -m pytest -q tests                 # all tests should pass
 python -m scripts.make_sample_data        # loads ~1,300 fake rows
 cd dbt && dbt seed --profiles-dir . && dbt build --profiles-dir . && cd ..
 streamlit run dashboard/app.py
@@ -80,11 +80,27 @@ you understand the limits of the data.
 
 ## Design decisions to explain in interviews
 - **Raw landing zone** keeps every API response so any model can be rebuilt without re-calling the API.
+  The monthly GitHub Actions job saves it (with the database) as a run artifact and restores it next run.
 - **Idempotent loads:** each month x category partition is deleted and re-inserted in one transaction;
-  reruns and backfills cannot duplicate rows. Re-pulling the latest month on each incremental run
-  handles Census revisions.
+  reruns and backfills cannot duplicate rows. Re-pulling the newest 3 months on each run handles
+  Census revisions.
+- **Failure handling:** a failed partition is logged to `raw.ingest_log` (status and error) and the run
+  continues, then exits non-zero with a summary; rerunning with `--resume` retries only what is missing.
+  Schema drift is the one error that stops the run, because it would affect every partition.
 - **Schema contract:** header drift fails loudly instead of silently loading wrong columns.
-- **dbt tests:** not-null, grain uniqueness, shares summing to 100%, and a freshness warning.
-- **Known limitation / next step:** the scheduled job keeps its DuckDB file in the Actions cache.
-  A production version would use MotherDuck, BigQuery or Snowflake and an orchestrator (Dagster/Airflow).
-  Doing that swap is a good stretch goal.
+- **Tests that can fail** (each was checked by breaking the data on purpose):
+  - *Reconciliation:* the sum of country values must match the API's own "TOTAL FOR ALL COUNTRIES"
+    row within 1% (catches a dropped country, a bad filter or a partial load). Warns for now.
+  - *Duplicate source rows* in staging fail the build.
+  - *dbt unit tests* prove that quantities in different units are never added together and that rows
+    without a unit or quantity are never priced.
+  - Allowlist, not-null and freshness checks; pytest covers loading, retries, resume and failures.
+- **Synthetic data includes the messy cases:** a country that disappears, a null unit, a unit switch,
+  a zero-value row and an injected price spike.
+- **Known limitations / next steps:**
+  - Persistence uses Actions artifacts (kept 90 days; the job runs monthly). A production version would
+    use MotherDuck, BigQuery or Snowflake plus object storage for the raw files, and an orchestrator.
+  - The price-alert rule is a z-score against a trailing 12 months, which is fragile when the history
+    itself contains spikes. A changepoint method would detect sustained level shifts better.
+  - Quantity-unit reporting in the source data is noisy for some categories (masks), so unit prices
+    there should be read with the trade-value threshold on the dashboard.

@@ -1,8 +1,16 @@
 """Load SYNTHETIC trade data into the raw table so you can build and test dbt models and the
-dashboard before touching the real API. Mimics the real HS10 shape (several HS10 codes per HS4
-category, quantities with units, a "TOTAL FOR ALL COUNTRIES" row). Uses the production loader.
+dashboard before touching the real API. It mimics the real HS10 shape (several HS10 codes per
+category, quantities with units, a "TOTAL FOR ALL COUNTRIES" row that reconciles with the countries)
+and deliberately includes the messy cases real Census data has. Uses the production loader.
 
     python -m scripts.make_sample_data
+
+Adversarial cases (each one exercises a path the clean data would never reach):
+  * a country that disappears (ITALY stops reporting after 2025-06)
+  * a month with a null unit and zero quantity (CHINA, 2024-03)
+  * a unit switch inside one product (INDIA reports KG instead of pieces, 2025-02, 8517)
+  * a zero-value row (MEXICO, 2023-05)
+  * an injected price spike that the alert model must find (INDIA, 6403, 2025-11)
 """
 import random
 
@@ -24,19 +32,28 @@ def build(month: str, hs4: str):
     unit, base = CATS[hs4]
     mi = MONTHS.index(month)
     rows = [EXPECTED_COLUMNS]
-    tot_val = 0.0
     codes = HS10.get(hs4) or [f"{hs4}{n:06d}" for n in (1, 2)]   # two HS10 codes per category
     for n, hs10 in enumerate(codes, start=1):
+        total = 0.0
         for ci, (code, name) in enumerate(COUNTRIES):
+            if name == "ITALY" and month >= "2025-07":
+                continue                                        # country disappears
             trend = 1 + (0.02 * mi if ci == 0 else -0.01 * mi if ci == 1 else 0.0)
             qty = max(1000, random.gauss(25000, 4000) * trend / (1 + ci * 0.25))
             price = base * (0.8 + 0.4 * (n - 1)) * random.gauss(1, 0.04)
             if code == "5330" and month == "2025-11" and hs4 == "6403":
-                price *= 1.9                            # injected anomaly for the alert model
-            val = qty * price
-            tot_val += val
-            rows.append([code, name, hs10, f"SAMPLE {hs10}", f"{val:.0f}", f"{qty:.0f}", unit, "HS10", "DET"])
-        rows.append(["-", "TOTAL FOR ALL COUNTRIES", hs10, f"SAMPLE {hs10}", f"{tot_val:.0f}", "1", unit, "HS10", "DET"])
+                price *= 1.9                                    # injected anomaly for the alert model
+            val, row_unit, row_qty = qty * price, unit, qty
+            if name == "CHINA" and month == "2024-03":
+                row_unit, row_qty = "-", 0                      # null unit, zero quantity
+            if name == "INDIA" and month == "2025-02" and hs4 == "8517" and n == 1:
+                row_unit, row_qty = "KG", qty / 20              # unit switch within one product
+            if name == "MEXICO" and month == "2023-05":
+                val, row_qty = 0.0, 0                           # zero-value row
+            total += val
+            rows.append([code, name, hs10, f"SAMPLE {hs10}", f"{val:.0f}", f"{row_qty:.0f}", row_unit, "HS10", "DET"])
+        # the API's own total row, which must reconcile with the countries above
+        rows.append(["-", "TOTAL FOR ALL COUNTRIES", hs10, f"SAMPLE {hs10}", f"{total:.0f}", "1", unit, "HS10", "DET"])
     return rows
 
 
