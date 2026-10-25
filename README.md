@@ -1,5 +1,5 @@
 # Supplier trade-intelligence pipeline
-
+[![ci](https://github.com/JosueFC/trade-intelligence-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/JosueFC/trade-intelligence-pipeline/actions/workflows/ci.yml)
 **Business question:** which supplier countries are gaining or losing share and price
 competitiveness in a product category, and when should a buyer reconsider sourcing?
 
