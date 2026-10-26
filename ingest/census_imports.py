@@ -1,12 +1,15 @@
 """Ingest monthly US import data (by country, by HS code) from the Census international trade API.
 
-Design goals (these are the things to talk about in interviews):
+Design:
   * Raw landing zone: every API response is saved untouched under data/raw/ before anything else.
   * Idempotent loads: each (month, hs4) partition is deleted and re-inserted in ONE transaction,
     so reruns and backfills never create duplicates.
   * Schema contract: the response header is checked against EXPECTED_COLUMNS; drift fails loudly.
-  * Incremental mode: --since-last picks up after the latest loaded month and stops when the
-    API has not published the next month yet.
+  * Incremental mode: --since-last re-pulls the latest loaded month (Census revises recent months)
+    and loads every month after it; months the API has not published yet are logged and skipped.
+
+The partition key is named hs4 for history, but it holds whatever HS prefix is configured
+(4 or 6 digits).
 
 Field names were verified against the API's variable list with `--probe` (Oct 2026).
 Re-run `--probe` if the API ever rejects a request; the schema check will also flag drift.
@@ -83,6 +86,22 @@ def connect(path: Path = DB_PATH) -> duckdb.DuckDBPyConnection:
     return con
 
 
+def load_categories(path: str | Path) -> list[str]:
+    """Read category prefixes from the config as text, rejecting codes that would break ingestion."""
+    cfg = yaml.safe_load(Path(path).read_text())
+    codes = [str(c["hs4"]).strip() for c in cfg["categories"]]
+    for code in codes:
+        if not code.isdigit() or len(code) not in (4, 6):
+            raise ValueError(f"Category {code!r} must be a 4- or 6-digit HS code (quote it in the YAML)")
+    if len(set(codes)) != len(codes):
+        raise ValueError(f"Duplicate categories in config: {codes}")
+    for a in codes:
+        for b in codes:
+            if a != b and b.startswith(a):
+                raise ValueError(f"Category {a} already contains {b}; the same rows would load twice")
+    return codes
+
+
 def months_between(start: str, end: str) -> list[str]:
     y, m = map(int, start.split("-"))
     ey, em = map(int, end.split("-"))
@@ -104,7 +123,7 @@ def fetch(month: str, hs4: str, api_key: str | None, session: requests.Session |
         "time": month,
         "COMM_LVL": "HS10",          # quantities only exist at HS10 detail (verified with probe)
         "I_COMMODITY": f"{hs4}*",    # wildcard: every HS10 code under this HS4 category
-        "SUMMARY_LVL": "DET",   # ask for individual countries only, not country groupings
+        "SUMMARY_LVL": "DET",   # individual countries, not groupings (a world-total row still comes back)
     }
     if api_key:
         params["key"] = api_key
@@ -284,8 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         probe()
         return 0
 
-    cfg = yaml.safe_load(Path(args.config).read_text())
-    hs_codes = [c["hs4"] for c in cfg["categories"]]
+    hs_codes = load_categories(args.config)
     api_key = os.environ.get("CENSUS_API_KEY")
     today = dt.date.today()
     end = args.end or f"{today.year:04d}-{today.month:02d}"

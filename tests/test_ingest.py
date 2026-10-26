@@ -131,3 +131,16 @@ def test_schema_drift_aborts_and_is_logged(tmp_path, monkeypatch):
     with pytest.raises(ci.SchemaDrift):
         ci.run(["2025-01", "2025-02"], ["8517"], None, con)
     assert con.execute("select count(*) from raw.ingest_log where status = 'failed'").fetchone()[0] == 1
+
+
+def test_load_categories_keeps_text_and_rejects_bad_codes(tmp_path):
+    def write(body):
+        p = tmp_path / "c.yml"
+        p.write_text(body)
+        return p
+
+    assert ci.load_categories(write('categories:\n  - hs4: "4015"\n  - hs4: 392010\n')) == ["4015", "392010"]
+    for bad in ('  - hs4: "40"\n', '  - hs4: "40A5"\n', '  - hs4: "4015"\n  - hs4: "401519"\n',
+                '  - hs4: "4015"\n  - hs4: "4015"\n'):
+        with pytest.raises(ValueError):
+            ci.load_categories(write("categories:\n" + bad))
